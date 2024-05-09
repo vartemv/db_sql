@@ -1,0 +1,455 @@
+
+-- V kontextu relační databáze lze vztah generalizace/specializace implementovat pomocí techniky nazývané "table inheritance".
+-- Tato technika využívá oddělené tabulky pro každou specializovanou entitu a propojení mezi nimi pomocí cizích klíčů.
+--Následující SQL kód ukazuje implementaci vztahu generalizace/specializace pro entitu "Person" a její specializované entity "Automechanic" a "Customer".
+
+--Entita "Person" obsahuje obecné atributy pro všechny osoby.
+--Entita "Automechanic" obsahuje specializované atributy pro automechaniky a má cizí klíč odkazující na entitu "Person".
+--Entita "Customer" obsahuje specializované atributy pro zákazníky a také má cizí klíč odkazující na entitu "Person".
+
+--Tímto způsobem je dosaženo oddělení obecných a specializovaných atributů a zachování vztahu generalizace/specializace v relační databázi.
+
+----------------------------CLEAN UP (in case tables and sequences exist)---------------------------------------
+
+BEGIN
+    FOR cc IN (SELECT sequence_name
+               FROM USER_SEQUENCES)
+        LOOP
+            EXECUTE IMMEDIATE 'DROP SEQUENCE ' || cc.SEQUENCE_NAME;
+        END LOOP;
+END;
+
+BEGIN
+    FOR t IN (SELECT table_name FROM user_tables )
+        LOOP
+            EXECUTE IMMEDIATE 'DROP TABLE ' || t.table_name || ' CASCADE CONSTRAINTS PURGE';
+        END LOOP;
+END;
+----------------------------CLEAN UP (in case tables and sequences exist)---------------------------------------
+
+----------------------------CREATE TABLES---------------------------------------
+
+CREATE TABLE Person
+(
+    Rodne_cislo  VARCHAR2(255) primary key,
+    Name         NVARCHAR2(255) NOT NULL,
+    Surname      NVARCHAR2(255) NOT NULL,
+    Phone_number NVARCHAR2(255) NOT NULL,
+    Email        NVARCHAR2(255) NOT NULL,
+    Street       NVARCHAR2(255) NOT NULL,
+    City         NVARCHAR2(255) NOT NULL,
+    ZIP          int            NOT NULL
+);
+
+CREATE TABLE Automechanic
+(
+    Rodne_cislo  VARCHAR2(255) PRIMARY KEY REFERENCES Person (Rodne_cislo) ON DELETE CASCADE,
+    specializace NVARCHAR2(255) NOT NULL
+);
+
+CREATE TABLE Customer
+(
+    Rodne_cislo VARCHAR2(255) PRIMARY KEY REFERENCES Person (Rodne_cislo) ON DELETE CASCADE
+);
+
+CREATE TABLE Repair
+(
+    RepairID    int PRIMARY KEY,
+    dataStart   NVARCHAR2(255) NOT NULL,
+    dataEnd     NVARCHAR2(255) NOT NULL,
+    Rodne_cislo VARCHAR2(255) REFERENCES Customer (Rodne_cislo)
+);
+
+CREATE TABLE RepairAutomechanic
+(
+    Rodne_cislo VARCHAR2(255) REFERENCES Automechanic (Rodne_cislo),
+    RepairID    int REFERENCES Repair (RepairID),
+    PRIMARY KEY (Rodne_cislo, RepairID)
+);
+
+CREATE TABLE Service
+(
+    ServiceID   int PRIMARY KEY,
+    Type        NVARCHAR2(255) NOT NULL,
+    Description NVARCHAR2(255) NOT NULL,
+    Price       NVARCHAR2(255) NOT NULL
+);
+
+CREATE TABLE ServiceForRepair
+(
+    RepairID  int REFERENCES Repair (RepairID),
+    ServiceID int REFERENCES Service (ServiceID),
+    PRIMARY KEY (RepairID, ServiceID)
+);
+
+CREATE TABLE Material
+(
+    MaterialID  int PRIMARY KEY,
+    Description NVARCHAR2(255) NOT NULL,
+    Price       NVARCHAR2(255) NOT NULL
+);
+
+
+CREATE TABLE MaterialForRepair
+(
+    RepairID   int REFERENCES Repair (RepairID),
+    MaterialID int REFERENCES Material (MaterialID),
+    PRIMARY KEY (RepairID, MaterialID),
+    count      int NOT NULL
+);
+
+CREATE TABLE Invoice
+(
+    RepairID    int PRIMARY KEY REFERENCES Repair (RepairID),
+    Type        NVARCHAR2(255) NOT NULL,
+    Description NVARCHAR2(255) NOT NULL,
+    Price       NVARCHAR2(255) NOT NULL
+);
+-------------------------CREATE TABLES---------------------------------------
+
+----------------------------TRIGGERS-----------------------------------------
+CREATE SEQUENCE material_seq START WITH 1 INCREMENT BY 1;
+
+CREATE OR REPLACE TRIGGER material_before_insert
+    BEFORE INSERT
+    ON Material
+    FOR EACH ROW
+BEGIN
+    IF :NEW.MaterialID IS NULL THEN
+        SELECT material_seq.NEXTVAL INTO :NEW.MaterialID FROM DUAL;
+    END IF;
+END;
+/
+
+CREATE SEQUENCE service_seq START WITH 1 INCREMENT BY 1;
+
+CREATE OR REPLACE TRIGGER service_before_insert
+    BEFORE INSERT
+    ON Service
+    FOR EACH ROW
+BEGIN
+    IF :NEW.ServiceID IS NULL THEN
+        SELECT service_seq.NEXTVAL INTO :NEW.ServiceID FROM DUAL;
+    END IF;
+END;
+/
+
+CREATE OR REPLACE TRIGGER check_service_price
+    BEFORE INSERT OR UPDATE OF Price
+    ON Service
+    FOR EACH ROW
+BEGIN
+    IF :NEW.Price > 1000 THEN
+        RAISE_APPLICATION_ERROR(-20002, 'Service Price should not exceed 1000');
+    END IF;
+END;
+/
+
+CREATE SEQUENCE repair_seq START WITH 1 INCREMENT BY 1;
+
+CREATE OR REPLACE TRIGGER repair_before_insert
+    BEFORE INSERT
+    ON Repair
+    FOR EACH ROW
+BEGIN
+    IF :NEW.RepairID IS NULL THEN
+        SELECT repair_seq.NEXTVAL INTO :NEW.RepairID FROM DUAL;
+    END IF;
+END;
+/
+
+CREATE OR REPLACE TRIGGER set_end_date
+    BEFORE INSERT
+    ON Repair
+    FOR EACH ROW
+BEGIN
+    :NEW.dataEnd := TO_CHAR(SYSDATE + 7, 'DD.MM.YYYY');
+END;
+/
+
+CREATE OR REPLACE TRIGGER check_rodne_cislo
+    BEFORE INSERT OR UPDATE
+    ON Person
+    FOR EACH ROW
+DECLARE
+    v_valid BOOLEAN;
+BEGIN
+    v_valid := (
+        REGEXP_LIKE(:NEW.Rodne_cislo, '^\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\/\d{4}$')
+        );
+
+    IF NOT v_valid THEN
+        RAISE_APPLICATION_ERROR(-20001, 'Rodne cislo is not valid');
+    END IF;
+END;
+/
+----------------------------TRIGGERS----------------------------------------
+
+----------------------------PROCEDURES---------------------------------------
+CREATE OR REPLACE PROCEDURE increase_service_price(p_increase_pct IN NUMBER) AS
+    v_new_price Service.Price%TYPE;
+BEGIN
+    FOR r_service IN (SELECT * FROM Service)
+        LOOP
+            v_new_price := r_service.Price * (1 + p_increase_pct / 100);
+            UPDATE Service SET Price = v_new_price WHERE ServiceID = r_service.ServiceID;
+        END LOOP;
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.put_line('An error occurred: ' || SQLCODE || ' - ' || SQLERRM);
+END;
+/
+
+CREATE OR REPLACE PROCEDURE print_persons_in_city(p_ZIP IN NUMBER) AS
+    CURSOR c_persons IS
+        SELECT *
+        FROM Person
+        where ZIP = p_ZIP;
+    v_person c_persons%ROWTYPE;
+BEGIN
+    OPEN c_persons;
+    FETCH c_persons INTO v_person;
+    WHILE c_persons%FOUND
+        LOOP
+            DBMS_OUTPUT.put_line('Person: ' || v_person.Name || ' ' || v_person.Surname);
+            FETCH c_persons INTO v_person;
+        END LOOP;
+    CLOSE c_persons;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.put_line('No persons found with the provided ZIP code.');
+END;
+/
+----------------------------PROCEDURES---------------------------------------
+
+---------------------------DATA INSERTS-------------------------------------
+
+INSERT INTO Person
+VALUES ('800102/5678', 'Petr', 'Svec', '987654321', 'svec@example.com', 'Kvetna 456', 'Liberec', 46001);
+INSERT INTO Person
+VALUES ('800103/9101', 'Karel', 'Vlk', '876543210', 'vlk@example.com', 'Lesni 789', 'Plzen', 30002);
+INSERT INTO Person
+VALUES ('800104/2131', 'Marek', 'Liška', '765432109', 'liska@example.com', 'Parkova 101', 'Brno', 60200);
+INSERT INTO Person
+VALUES ('800105/4651', 'Josef', 'Kocian', '654321098', 'kocian@example.com', 'Namesti 112', 'Ostrava', 71000);
+INSERT INTO Person
+VALUES ('800106/7891', 'Lukas', 'Nemec', '543210987', 'nemec@example.com', 'Prazska 123', 'Hradec Kralove', 50003);
+INSERT INTO Person
+VALUES ('900107/1213', 'Jan', 'Dvorak', '432109876', 'dvorak@example.com', 'Havlickova 234', 'Opava', 68004);
+INSERT INTO Person
+VALUES ('900108/1415', 'Adam', 'Novak', '321098765', 'novak@example.com', 'Veselska 345', 'Olomouc', 77905);
+INSERT INTO Person
+VALUES ('900109/1617', 'Pavel', 'Maly', '210987654', 'maly@example.com', 'Dlouha 456', 'Jablonec nad Nisou', 46606);
+INSERT INTO Person
+VALUES ('900110/1819', 'Jakub', 'Velky', '109876543', 'velky@example.com', 'Kratka 567', 'Praha', 10001);
+INSERT INTO Person
+VALUES ('900111/2021', 'Michal', 'Stredni', '9876543210', 'stredni@example.com', 'Široka 678', 'Zlin', 76007);
+INSERT INTO Person
+VALUES ('900112/2021', 'Michal', 'Smith', '9277543411', 'msmith@example.com', 'Kolejni 2', 'Brno', 61200);
+INSERT INTO Person
+VALUES ('801111/5678', 'Root', 'root', '987684321', 'artem@example.com', 'Kolejni 456', 'Brno', 46101);
+
+INSERT INTO Automechanic (Rodne_cislo, specializace)
+VALUES ('800102/5678', 'Brake repair specialist');
+INSERT INTO Automechanic (Rodne_cislo, specializace)
+VALUES ('800103/9101', 'Exhaust repair specialist');
+INSERT INTO Automechanic (Rodne_cislo, specializace)
+VALUES ('800104/2131', 'Transmission repair specialist');
+INSERT INTO Automechanic (Rodne_cislo, specializace)
+VALUES ('800105/4651', 'Suspension repair specialist');
+INSERT INTO Automechanic (Rodne_cislo, specializace)
+VALUES ('800106/7891', 'Electrical systems specialist');
+INSERT INTO Automechanic (Rodne_cislo, specializace)
+VALUES ('900112/2021', 'SMM specialist');
+
+INSERT INTO Customer (Rodne_cislo)
+VALUES ('900107/1213');
+INSERT INTO Customer (Rodne_cislo)
+VALUES ('900108/1415');
+INSERT INTO Customer (Rodne_cislo)
+VALUES ('900109/1617');
+INSERT INTO Customer (Rodne_cislo)
+VALUES ('900110/1819');
+INSERT INTO Customer (Rodne_cislo)
+VALUES ('900111/2021');
+
+INSERT INTO Repair (dataStart, dataEnd, Rodne_cislo)
+VALUES ('03.03.2023', '07.03.2023', '900107/1213');
+INSERT INTO Repair (dataStart, dataEnd, Rodne_cislo)
+VALUES ('05.05.2023', '09.05.2023', '900108/1415');
+INSERT INTO Repair (dataStart, dataEnd, Rodne_cislo)
+VALUES ('07.07.2023', '11.07.2023', '900109/1617');
+INSERT INTO Repair (dataStart, dataEnd, Rodne_cislo)
+VALUES ('09.09.2023', '13.09.2023', '900110/1819');
+INSERT INTO Repair (dataStart, dataEnd, Rodne_cislo)
+VALUES ('11.11.2023', '15.11.2023', '900111/2021');
+
+INSERT INTO Service (Type, Description, Price)
+VALUES ('Tyre check', 'Tyre check and replacement service', '200');
+INSERT INTO Service (Type, Description, Price)
+VALUES ('Brake check', 'Brake check and repair service', '300');
+INSERT INTO Service (Type, Description, Price)
+VALUES ('Exhaust check', 'Exhaust check and repair service', '400');
+INSERT INTO Service (Type, Description, Price)
+VALUES ('Transmission check', 'Transmission check and repair service', '500');
+INSERT INTO Service (Type, Description, Price)
+VALUES ('Electrical systems check', 'Electrical systems check and repair service', '600');
+
+INSERT INTO RepairAutomechanic (Rodne_cislo, RepairID)
+VALUES ('800102/5678', 2);
+INSERT INTO RepairAutomechanic (Rodne_cislo, RepairID)
+VALUES ('800103/9101', 3);
+INSERT INTO RepairAutomechanic (Rodne_cislo, RepairID)
+VALUES ('800104/2131', 4);
+INSERT INTO RepairAutomechanic (Rodne_cislo, RepairID)
+VALUES ('800106/7891', 5);
+INSERT INTO RepairAutomechanic (Rodne_cislo, RepairID)
+VALUES ('800105/4651', 5);
+INSERT INTO RepairAutomechanic (Rodne_cislo, RepairID)
+VALUES ('900112/2021', 5);
+
+INSERT INTO ServiceForRepair (RepairID, ServiceID)
+VALUES (2, 2);
+INSERT INTO ServiceForRepair (RepairID, ServiceID)
+VALUES (3, 3);
+INSERT INTO ServiceForRepair (RepairID, ServiceID)
+VALUES (4, 4);
+INSERT INTO ServiceForRepair (RepairID, ServiceID)
+VALUES (5, 5);
+INSERT INTO ServiceForRepair (RepairID, ServiceID)
+VALUES (5, 1);
+
+INSERT INTO Material (Description, Price)
+VALUES ('Tyres', '250');
+INSERT INTO Material (Description, Price)
+VALUES ('Brakes', '350');
+INSERT INTO Material (Description, Price)
+VALUES ('Exhaust', '450');
+INSERT INTO Material (Description, Price)
+VALUES ('Transmission', '550');
+INSERT INTO Material (Description, Price)
+VALUES ('Electrical wires', '300');
+
+INSERT INTO MaterialForRepair (RepairID, MaterialID, count)
+VALUES (2, 2, 2);
+INSERT INTO MaterialForRepair (RepairID, MaterialID, count)
+VALUES (3, 3, 1);
+INSERT INTO MaterialForRepair (RepairID, MaterialID, count)
+VALUES (4, 4, 1);
+INSERT INTO MaterialForRepair (RepairID, MaterialID, count)
+VALUES (5, 5, 5);
+INSERT INTO MaterialForRepair (RepairID, MaterialID, count)
+VALUES (5, 1, 4);
+
+INSERT INTO Invoice (RepairID, Type, Description, Price)
+VALUES (2, 'Repair Invoice', 'Invoice for car check-up service', '1000');
+INSERT INTO Invoice (RepairID, Type, Description, Price)
+VALUES (3, 'Repair Invoice', 'Invoice for car check-up service', '850');
+INSERT INTO Invoice (RepairID, Type, Description, Price)
+VALUES (4, 'Repair Invoice', 'Invoice for car check-up service', '1050');
+INSERT INTO Invoice (RepairID, Type, Description, Price)
+VALUES (5, 'Repair Invoice', 'Invoice for car check-up service', '3300');
+---------------------------DATA INSERTS-------------------------------------
+
+-----------------------------EXPLAIN PLAN-----------------------------------
+
+--- Two attempts to show difference in speed
+
+EXPLAIN PLAN FOR
+SELECT sr.RepairID, SUM(s.Price)
+FROM ServiceForRepair sr
+         JOIN Service s ON sr.ServiceID = s.ServiceID
+GROUP BY sr.RepairID;
+
+-- Use this to view the plan
+SELECT *
+FROM TABLE (DBMS_XPLAN.DISPLAY);
+
+CREATE INDEX idx_serviceforrepair_serviceid ON ServiceForRepair (ServiceID);
+
+EXPLAIN PLAN FOR
+SELECT sr.RepairID, SUM(s.Price)
+FROM ServiceForRepair sr
+         JOIN Service s ON sr.ServiceID = s.ServiceID
+GROUP BY sr.RepairID;
+
+-- Use this to view the plan
+SELECT *
+FROM TABLE (DBMS_XPLAN.DISPLAY);
+-----------------------------EXPLAIN PLAN-----------------------------------
+
+---------------------------MATERIALIZED PLAN------------------------------
+CREATE MATERIALIZED VIEW materialized_sales_view AS
+SELECT c.Rodne_cislo, p.Name, p.Surname, SUM(i.Price) AS total_spent
+FROM Customer c
+         INNER JOIN PERSON p ON c.Rodne_cislo = p.Rodne_cislo
+         JOIN Repair r ON c.Rodne_cislo = r.Rodne_cislo
+         JOIN Invoice i ON r.RepairID = i.RepairID
+GROUP BY c.Rodne_cislo, p.Name, p.Surname;
+
+-- In case when this materialized view is created by another user with proper privileges:
+-- CREATE MATERIALIZED VIEW materialized_sales_view AS
+-- SELECT c.Rodne_cislo, p.Name, p.Surname, SUM(i.Price) AS total_spent
+-- FROM XVEREN00.Customer c
+-- INNER JOIN XVEREN00.PERSON p ON c.Rodne_cislo = p.Rodne_cislo
+-- JOIN XVEREN00.Repair  r ON c.Rodne_cislo = r.Rodne_cislo
+-- JOIN XVEREN00.Invoice  i ON r.RepairID = i.RepairID
+-- GROUP BY c.Rodne_cislo, p.Name, p.Surname;
+
+---------------------------MATERIALIZED PLAN------------------------------
+
+---------------------------GRANT PRIVILEGES---------------------------------
+BEGIN
+    FOR t IN (SELECT table_name FROM user_tables )
+        LOOP
+            EXECUTE IMMEDIATE 'GRANT ALL ON ' || t.table_name || ' TO XDUMYC00';
+        END LOOP;
+END;
+---------------------------GRANT PRIVILEGES---------------------------------
+
+--------------------------------SELECT--------------------------------------
+-- Complex SELECT statement
+-- This statement tries to get a list of all persons with additional information. Depending on if the person is an
+-- automechanic or a customer, different information are provided for that person. If the person is neither an automechanic
+-- nor a customer, the type will be 'OTHER'.
+
+
+WITH person_data AS (SELECT p.Rodne_cislo     AS person_id,
+                            p.Name            AS person_name,
+                            p.Surname         AS person_surname,
+                            p.Phone_number,
+                            p.Email,
+                            p.Street,
+                            p.City,
+                            p.ZIP,
+                            CASE
+                                WHEN a.Rodne_cislo IS NOT NULL THEN 'AUTOMECHANIC'
+                                WHEN c.Rodne_cislo IS NOT NULL THEN 'CUSTOMER'
+                                ELSE 'OTHER'
+                                END           AS person_type,
+                            a.specializace    AS automechanic_specialization,
+                            COUNT(r.RepairID) AS customer_repairs
+                     FROM Person p
+                              LEFT JOIN
+                          Automechanic a ON p.Rodne_cislo = a.Rodne_cislo
+                              LEFT JOIN
+                          Customer c ON p.Rodne_cislo = c.Rodne_cislo
+                              LEFT JOIN
+                          Repair r ON c.Rodne_cislo = r.Rodne_cislo
+                     GROUP BY p.Rodne_cislo, p.Name, p.Surname, a.rodne_cislo, c.rodne_cislo, a.specializace,
+                              p.Phone_number, p.Email, p.Street, p.City, p.ZIP)
+SELECT person_id,
+       person_name,
+       person_surname,
+       Phone_number,
+       Email,
+       Street,
+       City,
+       ZIP,
+       person_type,
+       automechanic_specialization,
+       customer_repairs
+FROM person_data
+ORDER BY person_type;
+
+--------------------------------SELECT--------------------------------------
